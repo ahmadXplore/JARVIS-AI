@@ -1,5 +1,4 @@
 import os
-import subprocess
 import threading
 import speech_recognition as sr
 import pyttsx3
@@ -8,19 +7,23 @@ from deep_translator import GoogleTranslator
 from PyQt6.QtWidgets import (QApplication, QWidget, QTextBrowser, QVBoxLayout, 
                           QLineEdit, QPushButton, QHBoxLayout, QLabel, 
                           QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-                          QScrollArea)
+                          QScrollArea, QTextEdit)
 from PyQt6.QtCore import (QThread, pyqtSignal, Qt, QPropertyAnimation, 
-                       QEasingCurve, QSize, QTimer)
+                       QEasingCurve, QSize, QTimer, QPointF, QRectF)
 from PyQt6.QtGui import (QColor, QPalette, QFont, QIcon, QLinearGradient, 
-                      QGradient, QPainter, QBrush, QPen, QPainterPath)
+                      QGradient, QPainter, QBrush, QPen, QPainterPath,
+                      QTransform)
 import time
 from dotenv import load_dotenv
 from functools import lru_cache
 import queue
-import json
 import re
+import random
 from mistralai.client import MistralClient
 from mistralai.models.chat_completion import ChatMessage
+import math
+import webbrowser
+import requests
 
 load_dotenv()
 
@@ -59,66 +62,231 @@ class ResponseThread(QThread):
         answer = get_answer(translated_question)
         self.response_ready.emit(answer)
 
+class Particle:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.size = random.randint(2, 5)
+        self.speed = random.uniform(0.5, 2)
+        self.angle = random.uniform(0, 360)
+        self.opacity = random.uniform(0.3, 0.7)
+
+    def move(self):
+        self.x += self.speed * math.cos(math.radians(self.angle))
+        self.y += self.speed * math.sin(math.radians(self.angle))
+        self.opacity = max(0.1, self.opacity - 0.001)
+
+class RobotAnimation(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hover_offset = 0
+        self.hover_direction = 1
+        
+        # Animation parameters
+        self.arm_angle = 0
+        self.leg_angle = 0
+        self.arm_direction = 1
+        self.leg_direction = 1
+
+        # Timer for animations
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.animate)
+        self.timer.start(50)
+        self.setFixedSize(150, 150)  # Increased size for the full robot
+
+    def animate(self):
+        # Hover animation
+        self.hover_offset += 0.2 * self.hover_direction
+        if abs(self.hover_offset) >= 5:
+            self.hover_direction *= -1
+            
+        # Limb animation
+        self.arm_angle += 1 * self.arm_direction
+        if abs(self.arm_angle) >= 15:
+            self.arm_direction *= -1
+            
+        self.leg_angle += 0.5 * self.leg_direction
+        if abs(self.leg_angle) >= 10:
+            self.leg_direction *= -1
+            
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Save the current state
+        painter.save()
+        
+        # Translate to center and apply hover effect
+        painter.translate(self.width() / 2, self.height() / 2 + self.hover_offset)
+
+        # Draw robot body (torso)
+        painter.setPen(QPen(QColor("#3498db"), 2))
+        painter.setBrush(QBrush(QColor("#2c3e50")))
+        painter.drawRoundedRect(-20, -15, 40, 50, 10, 10)  # Torso
+
+        # Draw head with glowing elements
+        painter.drawEllipse(-25, -45, 50, 40)  # Head
+        
+        # Draw glowing eyes
+        painter.setBrush(QBrush(QColor("#3498db")))
+        painter.drawEllipse(-15, -35, 10, 10)  # Left eye
+        painter.drawEllipse(5, -35, 10, 10)    # Right eye
+        
+        # Draw antenna with glowing tip
+        painter.drawLine(0, -45, 0, -55)
+        gradient = QLinearGradient(0, -60, 0, -55)
+        gradient.setColorAt(0, QColor("#3498db"))
+        gradient.setColorAt(1, QColor("#2980b9"))
+        painter.setBrush(QBrush(gradient))
+        painter.drawEllipse(-5, -60, 10, 10)
+
+        # Draw arms with joints
+        painter.save()
+        painter.rotate(self.arm_angle)  # Animate arms
+        # Left arm
+        painter.drawRoundedRect(-45, -10, 25, 10, 5, 5)  # Upper arm
+        painter.drawEllipse(-48, -12, 14, 14)  # Shoulder joint
+        # Right arm
+        painter.drawRoundedRect(20, -10, 25, 10, 5, 5)   # Upper arm
+        painter.drawEllipse(34, -12, 14, 14)   # Shoulder joint
+        painter.restore()
+
+        # Draw legs with joints
+        painter.save()
+        painter.rotate(self.leg_angle)  # Animate legs
+        # Left leg
+        painter.drawRoundedRect(-30, 35, 15, 30, 5, 5)   # Upper leg
+        painter.drawEllipse(-28, 32, 12, 12)   # Hip joint
+        # Right leg
+        painter.drawRoundedRect(15, 35, 15, 30, 5, 5)    # Upper leg
+        painter.drawEllipse(16, 32, 12, 12)    # Hip joint
+        painter.restore()
+
+        # Draw chest light
+        gradient = QLinearGradient(0, -5, 0, 5)
+        gradient.setColorAt(0, QColor("#3498db"))
+        gradient.setColorAt(1, QColor("#2980b9"))
+        painter.setBrush(QBrush(gradient))
+        painter.drawEllipse(-10, 0, 20, 20)
+
+        # Restore the state
+        painter.restore()
+
+class ParticleBackground(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.particles = []
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.updateParticles)
+        self.timer.start(50)
+        self.generate_particles()
+
+    def generate_particles(self):
+        for _ in range(50):
+            x = random.randint(0, self.width())
+            y = random.randint(0, self.height())
+            self.particles.append(Particle(x, y))
+
+    def updateParticles(self):
+        for particle in self.particles:
+            particle.move()
+            if (particle.x < 0 or particle.x > self.width() or
+                particle.y < 0 or particle.y > self.height() or
+                particle.opacity < 0.1):
+                self.particles.remove(particle)
+                x = random.randint(0, self.width())
+                y = random.randint(0, self.height())
+                self.particles.append(Particle(x, y))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        for particle in self.particles:
+            color = QColor("#3498db")
+            color.setAlphaF(particle.opacity)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(
+                int(particle.x - particle.size/2),
+                int(particle.y - particle.size/2),
+                particle.size,
+                particle.size
+            )
+
 class JarvisUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Jarvis AI Assistant")
-        self.setGeometry(100, 100, 900, 500)  # Wider but shorter window
+        self.setGeometry(0, 0, 1366, 768)  # Set to a resolution suitable for Lenovo Yoga 460
+        
+        # Create particle background
+        self.particle_bg = ParticleBackground(self)
+        self.particle_bg.setGeometry(0, 0, 1366, 768)  # Adjust background size
+        
         self.setup_ui()
         self.response_threads = []
         self.setup_styles()
         self.setup_animations()
         
     def setup_styles(self):
-        # Dark theme with purple accents
+        # Dark blue theme with transparency
         self.setStyleSheet("""
             QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                          stop:0 #1a1a1a, stop:0.5 #2d2d2d, stop:1 #1a1a1a);
+                background: transparent;
                 color: #ffffff;
             }
             QTextBrowser {
-                background-color: rgba(255, 255, 255, 0.05);
+                background-color: rgba(28, 31, 44, 0.8);
                 border: 1px solid rgba(255, 255, 255, 0.1);
                 border-radius: 15px;
                 padding: 15px;
                 font-size: 14px;
-                selection-background-color: #9b59b6;
+                selection-background-color: #3498db;
             }
-            QLineEdit {
-                background-color: rgba(255, 255, 255, 0.07);
+            QTextEdit {
+                background-color: rgba(28, 31, 44, 0.8);
                 border: 2px solid rgba(255, 255, 255, 0.1);
-                border-radius: 25px;
+                border-radius: 10px;
                 padding: 12px 20px;
                 font-size: 14px;
                 color: white;
-                selection-background-color: #9b59b6;
-            }
-            QLineEdit:focus {
-                border: 2px solid #9b59b6;
-                background-color: rgba(255, 255, 255, 0.1);
+                selection-background-color: #3498db;
             }
             QPushButton {
                 background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                                stop:0 #9b59b6, stop:1 #8e44ad);
+                                                stop:0 #3498db, stop:1 #2980b9);
                 border: none;
-                border-radius: 25px;
+                border-radius: 15px;
                 padding: 12px 25px;
                 color: white;
                 font-weight: bold;
                 font-size: 14px;
+                box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.3);
             }
             QPushButton:hover {
                 background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                                stop:0 #a66bbe, stop:1 #9b59b6);
+                                                stop:0 #3ea8e5, stop:1 #3498db);
             }
             QPushButton:pressed {
                 background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                                stop:0 #8e44ad, stop:1 #763c94);
+                                                stop:0 #2980b9, stop:1 #2472a4);
+            }
+            QPushButton:disabled {
+                background-color: rgba(52, 73, 94, 0.7);
+                color: rgba(255, 255, 255, 0.7);
             }
             QLabel {
                 color: #ffffff;
                 font-family: 'Segoe UI', Arial;
+            }
+            #container {
+                background-color: rgba(28, 31, 44, 0.7);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 20px;
             }
         """)
 
@@ -130,56 +298,49 @@ class JarvisUI(QWidget):
         
     def setup_ui(self):
         main_layout = QVBoxLayout()
-        main_layout.setSpacing(15)  # Reduced spacing
-        main_layout.setContentsMargins(30, 20, 30, 20)  # Reduced vertical margins
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(15, 20, 15, 20)
         
         # Glassmorphism container
         container = QFrame()
         container.setObjectName("container")
-        container.setStyleSheet("""
-            #container {
-                background-color: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 20px;
-            }
-        """)
         container_layout = QVBoxLayout(container)
-        container_layout.setSpacing(15)  # Reduced spacing
-        container_layout.setContentsMargins(25, 20, 25, 20)  # Reduced margins
+        container_layout.setSpacing(15)
+        container_layout.setContentsMargins(15, 20, 15, 20)
         
-        # Header with modern design
+        # Header with robot animation
         header_frame = QFrame()
         header_frame.setStyleSheet("""
             QFrame {
                 background-color: rgba(255, 255, 255, 0.1);
                 border-radius: 15px;
-                padding: 5px;  # Reduced padding
+                padding: 5px;
             }
         """)
         header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(15, 5, 15, 5)  # Reduced margins
+        header_layout.setContentsMargins(15, 5, 15, 5)
         
-        logo_label = QLabel("🤖")
-        logo_label.setFont(QFont("Segoe UI", 32))  # Slightly smaller font
-        logo_label.setStyleSheet("background: none;")
+        # Add rotating robot
+        self.robot_animation = RobotAnimation()
         
-        title_label = QLabel("JARVIS AI")
-        title_label.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))  # Slightly smaller font
+        title_label = QLabel("JARVIS")
+        title_label.setFont(QFont("Segoe UI", 32, QFont.Weight.Bold))
         title_label.setStyleSheet("""
-            color: #9b59b6;
+            color: #3498db;
             background: none;
         """)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.status_label = QLabel("🎤 Voice Recognition Active")
-        self.status_label.setFont(QFont("Segoe UI", 11))  # Slightly smaller font
+        self.status_label.setFont(QFont("Segoe UI", 11))
         self.status_label.setStyleSheet("""
-            color: #9b59b6;
-            background: rgba(155, 89, 182, 0.1);
-            padding: 6px 12px;  # Reduced padding
+            color: #3498db;
+            background: rgba(52, 152, 219, 0.1);
+            padding: 6px 12px;
             border-radius: 12px;
         """)
         
-        header_layout.addWidget(logo_label)
+        header_layout.addWidget(self.robot_animation)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
         header_layout.addWidget(self.status_label)
@@ -195,17 +356,17 @@ class JarvisUI(QWidget):
             }
         """)
         chat_layout = QVBoxLayout(chat_frame)
-        chat_layout.setContentsMargins(10, 10, 10, 10)  # Reduced margins
+        chat_layout.setContentsMargins(10, 10, 10, 10)
         
         self.text_browser = QTextBrowser()
-        self.text_browser.setFont(QFont("Segoe UI", 11))  # Slightly smaller font
-        self.text_browser.setMinimumHeight(280)  # Reduced height
-        self.text_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.text_browser.setFont(QFont("Segoe UI", 11))
+        self.text_browser.setMinimumHeight(280)
+        self.text_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         
         chat_layout.addWidget(self.text_browser)
         container_layout.addWidget(chat_frame)
         
-        # Modern input area
+        # Modern input area with fixed width for send button
         input_frame = QFrame()
         input_frame.setStyleSheet("""
             QFrame {
@@ -214,21 +375,23 @@ class JarvisUI(QWidget):
                 padding: 5px;
             }
         """)
-        input_layout = QHBoxLayout(input_frame)
-        input_layout.setContentsMargins(15, 8, 15, 8)  # Reduced margins
+        self.input_layout = QHBoxLayout(input_frame)
+        self.input_layout.setContentsMargins(10, 8, 10, 8)
+        self.input_layout.setSpacing(10)
         
-        self.text_input = QLineEdit()
+        self.text_input = QTextEdit()  # Changed from QLineEdit to QTextEdit for multi-line input
         self.text_input.setPlaceholderText("Type your question here...")
-        self.text_input.setMinimumHeight(40)  # Reduced height
-        self.text_input.setFont(QFont("Segoe UI", 11))  # Slightly smaller font
+        self.text_input.setMinimumHeight(10)  # Reduced height for better appearance
+        self.text_input.setMinimumWidth(400)  # Reduced width for better appearance
+        self.text_input.setFont(QFont("Segoe UI", 11))
         
         self.send_button = QPushButton("Send")
-        self.send_button.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))  # Slightly smaller font
-        self.send_button.setMinimumHeight(40)  # Reduced height
-        self.send_button.setMinimumWidth(100)  # Slightly smaller width
+        self.send_button.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.send_button.setMinimumHeight(45)
+        self.send_button.setFixedWidth(120)  # Keep the send button width as is for usability
         
-        input_layout.addWidget(self.text_input)
-        input_layout.addWidget(self.send_button)
+        self.input_layout.addWidget(self.text_input, stretch=1)
+        self.input_layout.addWidget(self.send_button)
         
         container_layout.addWidget(input_frame)
         
@@ -244,7 +407,7 @@ class JarvisUI(QWidget):
         footer_layout = QHBoxLayout(footer_frame)
         
         footer_text = QLabel("Say 'Jarvis' to activate voice commands")
-        footer_text.setFont(QFont("Segoe UI", 10))  # Slightly smaller font
+        footer_text.setFont(QFont("Segoe UI", 10))
         footer_text.setStyleSheet("""
             color: #888888;
             background: none;
@@ -257,13 +420,18 @@ class JarvisUI(QWidget):
         self.setLayout(main_layout)
         
         # Connect signals
-        self.text_input.returnPressed.connect(self.handle_text_input)
         self.send_button.clicked.connect(self.handle_text_input)
         
         # Start listener thread
         self.listener_thread = ListenerThread()
         self.listener_thread.text_signal.connect(self.handle_thread_signal)
         self.listener_thread.start()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+            self.handle_text_input()
+        elif event.key() == Qt.Key.Key_Shift and event.key() == Qt.Key.Key_Return:
+            self.text_input.insertPlainText("\n")  # Allow new line
 
     def handle_thread_signal(self, text):
         # Animate the status indicator when receiving signals
@@ -272,7 +440,7 @@ class JarvisUI(QWidget):
             self.status_label.setStyleSheet("color: #ff6b6b;")
         else:
             self.status_label.setText("🎤 Voice Recognition Active")
-            self.status_label.setStyleSheet("color: #9b59b6;")
+            self.status_label.setStyleSheet("color: #3498db;")
         
         # Add text with styling
         if "You:" in text:
@@ -288,12 +456,12 @@ class JarvisUI(QWidget):
             message_html = f"""
                 <div style='margin: 15px 0;'>
                     <div style='text-align: right;'>
-                        <span style='background: linear-gradient(135deg, #9b59b6, #8e44ad);
+                        <span style='background: linear-gradient(135deg, #3498db, #2980b9);
                                padding: 12px 20px;
                                border-radius: 20px 20px 5px 20px;
                                display: inline-block;
-                               max-width: 70%;
-                               box-shadow: 0 4px 15px rgba(155, 89, 182, 0.2);'>
+                               max-width: 85%;
+                               box-shadow: 0 4px 15px rgba(52, 152, 219, 0.2);'>
                             {text}
                         </span>
                         <br>
@@ -309,7 +477,7 @@ class JarvisUI(QWidget):
                                padding: 12px 20px;
                                border-radius: 20px 20px 20px 5px;
                                display: inline-block;
-                               max-width: 70%;
+                               max-width: 85%;
                                box-shadow: 0 4px 15px rgba(44, 62, 80, 0.2);'>
                             {text}
                         </span>
@@ -328,7 +496,7 @@ class JarvisUI(QWidget):
         speak(answer)
 
     def handle_text_input(self):
-        question = self.text_input.text().strip()
+        question = self.text_input.toPlainText().strip()
         if question:
             self.text_input.clear()
             self.add_message(f"👤 You: {question}", is_user=True)
@@ -346,6 +514,10 @@ class JarvisUI(QWidget):
     def reset_send_button(self):
         self.send_button.setEnabled(True)
         self.send_button.setText("Send")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.particle_bg.setGeometry(0, 0, self.width(), self.height())
 
 class ListenerThread(QThread):
     text_signal = pyqtSignal(str)
@@ -371,11 +543,11 @@ class ListenerThread(QThread):
                     while True:
                         try:
                             print("Waiting for command...")
-                            audio = recognizer.listen(source, timeout=None, phrase_time_limit=8)  # Increased to 8 seconds
+                            audio = recognizer.listen(source, timeout=None, phrase_time_limit=8)
                             
                             try:
                                 command = recognizer.recognize_google(audio).lower()
-                                print(f"Heard: {command}")  # Debug print
+                                print(f"Heard: {command}")
                                 
                                 if "jarvis" in command:
                                     self.text_signal.emit("\n👤 You: Jarvis")
@@ -423,7 +595,7 @@ class ListenerThread(QThread):
                         
                         try:
                             question = recognizer.recognize_google(audio).lower()
-                            print(f"Heard: {question}")
+                            print(f"Heard: {question}")  # Debugging line
                             
                             if "goodbye" in question or "bye" in question:
                                 self.text_signal.emit("\n👤 You: " + question)
@@ -431,7 +603,15 @@ class ListenerThread(QThread):
                                 speak("Goodbye! Call me if you need anything.")
                                 return
                             
-                            if question.strip():
+                            # Check for commands
+                            if "set timer" in question:
+                                print("Detected command: set timer")  # Debugging line
+                                self.set_timer(question)
+                            elif "play music" in question:
+                                print("Detected command: play music")  # Debugging line
+                                self.play_music()
+                            else:
+                                print("Processing as a regular question")  # Debugging line
                                 self.text_signal.emit(f"\n👤 You: {question}")
                                 translated_question = translate_to_english(question)
                                 answer = get_answer(translated_question)
@@ -452,6 +632,50 @@ class ListenerThread(QThread):
             print(f"Microphone error in conversation: {e}")
             self.text_signal.emit("⚠️ Microphone error. Please try again.")
             return
+
+    def set_timer(self, question):
+        match = re.search(r'(\d+)\s*seconds?', question)
+        if match:
+            seconds = int(match.group(1))
+            threading.Timer(seconds, self.timer_finished).start()
+            self.text_signal.emit(f"⏰ Timer set for {seconds} seconds.")
+            speak(f"Timer set for {seconds} seconds.")
+        else:
+            self.text_signal.emit("⚠️ I couldn't understand the timer duration.")
+            speak("I couldn't understand the timer duration.")
+
+    def timer_finished(self):
+        self.text_signal.emit("⏰ Time's up!")
+        speak("Time's up!")
+
+    def play_music(self):
+        music_directory = "/This PC/music"  # Change this to your actual music directory
+        music_files = [f for f in os.listdir(music_directory) if f.endswith(('.mp3', '.wav'))]
+        if music_files:
+            os.startfile(os.path.join(music_directory, music_files[0]))
+            self.text_signal.emit("🎶 Playing music.")
+            speak("Playing music.")
+        else:
+            webbrowser.open("https://www.youtube.com/results?search_query=music")
+            self.text_signal.emit("🎶 No music files found. Opening music in the browser.")
+            speak("No music files found. Opening music in the browser.")
+
+    def tell_weather(self):
+        # Replace with your weather API key and endpoint
+        api_key = "YOUR_WEATHER_API_KEY"
+        city = "YOUR_CITY"  # You can modify this to get the city from the user
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+        
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            temperature = data['main']['temp']
+            weather_description = data['weather'][0]['description']
+            self.text_signal.emit(f"The current temperature in {city} is {temperature}°C with {weather_description}.")
+            speak(f"The current temperature in {city} is {temperature} degrees Celsius with {weather_description}.")
+        else:
+            self.text_signal.emit("⚠️ Unable to fetch weather data.")
+            speak("Unable to fetch weather data.")
 
 @lru_cache(maxsize=100)
 def translate_to_english(text):
